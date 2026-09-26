@@ -5,6 +5,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from PIL import Image
+import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
 class BahdanauAttention(Layer):
@@ -227,7 +228,10 @@ class RadiologyReportGenerator:
         attn_resized = np.array(attn_pil) / 255.0
 
         # Apply Matplotlib Jet colormap
-        cmap = cm.get_cmap('jet')
+        try:
+            cmap = plt.get_cmap('jet')
+        except AttributeError:
+            cmap = cm.colormaps['jet']
         heatmap_colored = (cmap(attn_resized)[:, :, :3] * 255).astype(np.uint8)
         heatmap_pil = Image.fromarray(heatmap_colored)
 
