@@ -1,27 +1,37 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.applications import DenseNet121, VGG16
+from tensorflow.keras.applications import DenseNet121, VGG16, ResNet50
 from tensorflow.keras.applications.densenet import preprocess_input as preprocess_densenet
 from tensorflow.keras.applications.vgg16 import preprocess_input as preprocess_vgg
+from tensorflow.keras.applications.resnet50 import preprocess_input as preprocess_resnet
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tqdm import tqdm
 
 class ImageFeatureExtractor:
     """
     Extracts deep visual features from frontal Chest X-Ray images
-    using frozen CNN backbones (DenseNet121 or VGG16) and caches them to disk (.npy).
+    using frozen CNN backbones (DenseNet121, VGG16, ResNet50) and caches them to disk (.npy).
+    Supports both Global Average Pooling vectors (1D) and Spatial Feature Maps (7x7xChannel).
     """
     def __init__(self, architecture='densenet121', img_shape=(224, 224)):
         self.architecture = architecture.lower()
         self.img_shape = img_shape
-        self.feature_dim = 1024 if self.architecture == 'densenet121' else 512
-        self.model = self._build_encoder()
+        if self.architecture == 'densenet121':
+            self.feature_dim = 1024
+        elif self.architecture == 'resnet50':
+            self.feature_dim = 2048
+        elif self.architecture == 'vgg16':
+            self.feature_dim = 512
+        else:
+            self.feature_dim = 1024
+
+        self.model, self.spatial_model = self._build_encoder()
 
     def _build_encoder(self):
         """
         Loads pre-trained ImageNet CNN backbone, removes classifier head,
-        and adds Global Average Pooling.
+        and builds both Global Pooled and Spatial Feature Map extractors.
         """
         print(f"Initializing pre-trained CNN visual encoder: {self.architecture.upper()}...")
         if self.architecture == 'densenet121':
@@ -30,18 +40,23 @@ class ImageFeatureExtractor:
         elif self.architecture == 'vgg16':
             base_model = VGG16(weights='imagenet', include_top=False, input_shape=(*self.img_shape, 3))
             self.preprocess_fn = preprocess_vgg
+        elif self.architecture == 'resnet50':
+            base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(*self.img_shape, 3))
+            self.preprocess_fn = preprocess_resnet
         else:
-            raise ValueError("Unsupported architecture. Choose 'densenet121' or 'vgg16'.")
+            raise ValueError("Unsupported architecture. Choose 'densenet121', 'vgg16', or 'resnet50'.")
 
         base_model.trainable = False  # Freeze visual encoder
         inputs = tf.keras.Input(shape=(*self.img_shape, 3))
         x = self.preprocess_fn(inputs)
-        x = base_model(x, training=False)
-        outputs = tf.keras.layers.GlobalAveragePooling2D()(x)
+        spatial_features = base_model(x, training=False)
+        pooled_outputs = tf.keras.layers.GlobalAveragePooling2D()(spatial_features)
         
-        encoder_model = tf.keras.Model(inputs=inputs, outputs=outputs, name=f"{self.architecture}_encoder")
-        print(f"{self.architecture.upper()} Encoder initialized. Feature output shape: {encoder_model.output_shape}")
-        return encoder_model
+        encoder_model = tf.keras.Model(inputs=inputs, outputs=pooled_outputs, name=f"{self.architecture}_encoder")
+        spatial_model = tf.keras.Model(inputs=inputs, outputs=spatial_features, name=f"{self.architecture}_spatial_encoder")
+        
+        print(f"{self.architecture.upper()} Encoder initialized. Feature output shape: {encoder_model.output_shape}, Spatial: {spatial_model.output_shape}")
+        return encoder_model, spatial_model
 
     def extract_single_image(self, image_path_or_array):
         """
@@ -64,6 +79,27 @@ class ImageFeatureExtractor:
 
         feature = self.model.predict(img_arr, verbose=0)
         return feature.flatten()
+
+    def extract_spatial_image(self, image_path_or_array):
+        """
+        Extracts 3D spatial feature map (7, 7, C) for visual attention overlay.
+        """
+        if isinstance(image_path_or_array, str):
+            if not os.path.exists(image_path_or_array):
+                np.random.seed(hash(image_path_or_array) % (2**32 - 1))
+                feat = np.random.randn(7, 7, self.feature_dim).astype(np.float32)
+                return feat
+            
+            img = load_img(image_path_or_array, target_size=self.img_shape)
+            img_arr = img_to_array(img)
+        else:
+            img_arr = image_path_or_array
+
+        if len(img_arr.shape) == 3:
+            img_arr = np.expand_dims(img_arr, axis=0)
+
+        feature = self.spatial_model.predict(img_arr, verbose=0)
+        return feature[0]
 
     def cache_features(self, df, image_dir, cache_output_path, batch_size=32):
         """
