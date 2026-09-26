@@ -71,10 +71,50 @@ class RadiologyEvaluator:
             return 0.0
         return (2 * precision * recall) / (precision + recall)
 
+    def evaluate_clinical_pathology(self, references, hypotheses):
+        """
+        Calculates Clinical Pathology Entity Extraction F1, Precision, and Recall scores.
+        Evaluates agreement on 8 core radiological conditions:
+        ['cardiomegaly', 'effusion', 'atelectasis', 'pneumonia', 'opacity', 'pneumothorax', 'edema', 'normal']
+        """
+        pathologies = ['cardiomegaly', 'effusion', 'atelectasis', 'pneumonia', 'opacity', 'pneumothorax', 'edema', 'normal']
+        
+        precisions, recalls, f1s = [], [], []
+
+        for ref, hyp in zip(references, hypotheses):
+            ref_lower = ref.lower()
+            hyp_lower = hyp.lower()
+
+            ref_set = set(p for p in pathologies if p in ref_lower)
+            hyp_set = set(p for p in pathologies if p in hyp_lower)
+
+            if 'no acute' in ref_lower or 'clear' in ref_lower or 'normal' in ref_lower:
+                ref_set.add('normal')
+            if 'no acute' in hyp_lower or 'clear' in hyp_lower or 'normal' in hyp_lower:
+                hyp_set.add('normal')
+
+            tp = len(ref_set.intersection(hyp_set))
+            fp = len(hyp_set - ref_set)
+            fn = len(ref_set - hyp_set)
+
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+            f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+
+            precisions.append(prec)
+            recalls.append(rec)
+            f1s.append(f1)
+
+        return {
+            'Clinical-Precision': float(np.mean(precisions)),
+            'Clinical-Recall': float(np.mean(recalls)),
+            'Clinical-F1': float(np.mean(f1s))
+        }
+
     def evaluate_corpus(self, references, hypotheses):
         """
         Evaluates an entire dataset corpus of reference and hypothesis texts.
-        Returns average BLEU-1..4 and ROUGE-L scores.
+        Returns average BLEU-1..4, ROUGE-L, and Clinical F1 scores.
         """
         b1_list, b2_list, b3_list, b4_list = [], [], [], []
         rouge_list = []
@@ -89,13 +129,17 @@ class RadiologyEvaluator:
             b4_list.append(b4)
             rouge_list.append(r_l)
 
-        return {
+        nlp_scores = {
             'BLEU-1': float(np.mean(b1_list)),
             'BLEU-2': float(np.mean(b2_list)),
             'BLEU-3': float(np.mean(b3_list)),
             'BLEU-4': float(np.mean(b4_list)),
             'ROUGE-L': float(np.mean(rouge_list))
         }
+
+        clinical_scores = self.evaluate_clinical_pathology(references, hypotheses)
+        nlp_scores.update(clinical_scores)
+        return nlp_scores
 
     def compute_most_common_baseline(self, train_references, test_references):
         """
@@ -106,7 +150,6 @@ class RadiologyEvaluator:
         if not train_references:
             most_common = "the heart size and pulmonary vascularity appear within normal limits . no focal consolidation or pleural effusion ."
         else:
-            # Find most common report
             counts = pd.Series(train_references).value_counts()
             most_common = counts.index[0]
 
@@ -115,6 +158,31 @@ class RadiologyEvaluator:
         
         return self.evaluate_corpus(test_references, baseline_hypotheses)
 
+    @staticmethod
+    def generate_benchmark_table(results_dict):
+        """
+        Generates a formatted GitHub Markdown table comparing multiple experiment runs.
+        """
+        headers = ["Model / Configuration", "BLEU-1", "BLEU-2", "BLEU-3", "BLEU-4", "ROUGE-L", "Clinical F1"]
+        lines = [
+            "| " + " | ".join(headers) + " |",
+            "|" + "|".join(["---"] * len(headers)) + "|"
+        ]
+        
+        for name, metrics in results_dict.items():
+            row = [
+                f"**{name}**",
+                f"{metrics.get('BLEU-1', 0):.3f}",
+                f"{metrics.get('BLEU-2', 0):.3f}",
+                f"{metrics.get('BLEU-3', 0):.3f}",
+                f"{metrics.get('BLEU-4', 0):.3f}",
+                f"{metrics.get('ROUGE-L', 0):.3f}",
+                f"{metrics.get('Clinical-F1', 0):.3f}"
+            ]
+            lines.append("| " + " | ".join(row) + " |")
+
+        return "\n".join(lines)
+
 
 if __name__ == "__main__":
     evaluator = RadiologyEvaluator()
@@ -122,3 +190,4 @@ if __name__ == "__main__":
     hyps = ["the heart size is normal . no consolidation ."]
     scores = evaluator.evaluate_corpus(refs, hyps)
     print("Sample Evaluation Scores:", scores)
+
