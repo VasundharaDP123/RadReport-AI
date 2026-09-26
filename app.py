@@ -234,13 +234,14 @@ def generate_pathology_risk_bars(generated_text):
 
 def process_radiology_pipeline(input_image, encoder_choice, decoding_strategy, beam_width):
     """
-    Main Gradio Event Handler: Generates Findings, Visual Attention Overlay,
-    Benchmark Scores, Pathology Risk Breakdown, and Downloadable PDF Report.
+    Main Gradio Event Handler: Processes uploaded X-Ray (PIL Image, numpy array, or filepath string),
+    generates Findings, Visual Attention Heatmap Overlay, Benchmark Scores,
+    Pathology Risk Breakdown, and Downloadable PDF Report.
     """
     if input_image is None:
         return (
-            "<div style='color:#f87171; font-weight:600; padding:12px;'>⚠️ Please upload or select a frontal chest X-ray image to begin diagnostic analysis.</div>",
-            "Upload Required",
+            "Please upload or select a frontal chest X-ray image.",
+            "<div style='color:#f87171; font-weight:600; padding:12px;'>⚠️ Please upload or select a frontal chest X-ray image.</div>",
             "N/A",
             None,
             None,
@@ -248,8 +249,21 @@ def process_radiology_pipeline(input_image, encoder_choice, decoding_strategy, b
         )
 
     try:
+        # Convert input_image robustly to RGB PIL Image
+        if isinstance(input_image, str):
+            if os.path.exists(input_image):
+                pil_img = Image.open(input_image).convert('RGB')
+            else:
+                return f"Image file not found: {input_image}", "File Error", "N/A", None, None, "<div>Error loading image.</div>"
+        elif isinstance(input_image, np.ndarray):
+            pil_img = Image.fromarray(input_image).convert('RGB')
+        elif isinstance(input_image, Image.Image):
+            pil_img = input_image.convert('RGB')
+        else:
+            pil_img = Image.fromarray(np.array(input_image)).convert('RGB')
+
         extractor, generator = get_or_create_model(encoder_choice)
-        img_array = np.array(input_image.convert('RGB'))
+        img_array = np.array(pil_img)
         
         # 1. Extract 1D Global & 3D Spatial Visual Features
         feature_vector = extractor.extract_single_image(img_array)
@@ -271,7 +285,7 @@ def process_radiology_pipeline(input_image, encoder_choice, decoding_strategy, b
         # 3. Explainable AI Heatmap Overlay
         _, attn_maps = generator.generate_report_with_attention(spatial_features, word2idx, idx2word)
         avg_attn_map = np.mean(attn_maps, axis=0) if attn_maps else np.ones((7, 7)) / 49.0
-        xai_heatmap_img = generator.overlay_attention_heatmap(input_image, avg_attn_map, alpha=0.45)
+        xai_heatmap_img = generator.overlay_attention_heatmap(pil_img, avg_attn_map, alpha=0.45)
 
         # 4. Clinical Status Classification
         abnormal_keywords = ['cardiomegaly', 'opacity', 'pneumonia', 'effusion', 'atelectasis', 'enlarged', 'infiltrate', 'opacification', 'congestion']
@@ -455,11 +469,6 @@ with gr.Blocks(title="RadReport-AI Clinical Diagnostic Suite") as demo:
                 sample_pneu = gr.Button("Pneumonia", elem_classes=["sample-btn"])
                 sample_eff = gr.Button("Pleural Effusion", elem_classes=["sample-btn"])
 
-            sample_norm.click(fn=lambda: create_synthetic_sample_image("Normal Chest"), outputs=input_img)
-            sample_cardio.click(fn=lambda: create_synthetic_sample_image("Cardiomegaly"), outputs=input_img)
-            sample_pneu.click(fn=lambda: create_synthetic_sample_image("Pneumonia / Opacity"), outputs=input_img)
-            sample_eff.click(fn=lambda: create_synthetic_sample_image("Pleural Effusion"), outputs=input_img)
-
             gr.Markdown("### 2. Configure Generation Hyperparameters")
             encoder_dropdown = gr.Dropdown(
                 choices=["DenseNet121", "ResNet50", "VGG16"],
@@ -499,10 +508,47 @@ with gr.Blocks(title="RadReport-AI Clinical Diagnostic Suite") as demo:
                 with gr.Tab("📊 Quantitative Benchmark Metrics"):
                     metrics_output = gr.Textbox(label="Indiana University (Open-i) Test Benchmark Scores", lines=6, interactive=False)
 
+    # Attach event handlers after all UI components are defined
+    pipeline_outputs = [report_output, status_output, metrics_output, xai_output, pdf_download, risk_output]
+    pipeline_inputs = [input_img, encoder_dropdown, decoding_radio, beam_slider]
+
+    def load_and_process_sample(sample_type, encoder, strategy, beam_w):
+        img = create_synthetic_sample_image(sample_type)
+        res = process_radiology_pipeline(img, encoder, strategy, beam_w)
+        return (img, *res)
+
+    sample_norm.click(
+        fn=lambda e, s, b: load_and_process_sample("Normal Chest", e, s, b),
+        inputs=[encoder_dropdown, decoding_radio, beam_slider],
+        outputs=[input_img, *pipeline_outputs]
+    )
+    sample_cardio.click(
+        fn=lambda e, s, b: load_and_process_sample("Cardiomegaly", e, s, b),
+        inputs=[encoder_dropdown, decoding_radio, beam_slider],
+        outputs=[input_img, *pipeline_outputs]
+    )
+    sample_pneu.click(
+        fn=lambda e, s, b: load_and_process_sample("Pneumonia / Opacity", e, s, b),
+        inputs=[encoder_dropdown, decoding_radio, beam_slider],
+        outputs=[input_img, *pipeline_outputs]
+    )
+    sample_eff.click(
+        fn=lambda e, s, b: load_and_process_sample("Pleural Effusion", e, s, b),
+        inputs=[encoder_dropdown, decoding_radio, beam_slider],
+        outputs=[input_img, *pipeline_outputs]
+    )
+
+    # Auto-run report generation as soon as an image is dropped or uploaded
+    input_img.change(
+        fn=process_radiology_pipeline,
+        inputs=pipeline_inputs,
+        outputs=pipeline_outputs
+    )
+
     generate_btn.click(
         fn=process_radiology_pipeline,
-        inputs=[input_img, encoder_dropdown, decoding_radio, beam_slider],
-        outputs=[report_output, status_output, metrics_output, xai_output, pdf_download, risk_output]
+        inputs=pipeline_inputs,
+        outputs=pipeline_outputs
     )
 
     with gr.Accordion("📚 Technical Architecture & Clinical Methodology Overview", open=False):
